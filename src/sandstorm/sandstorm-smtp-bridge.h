@@ -354,9 +354,6 @@ namespace sandstorm {
         setBody(email, part, true);
       }
 
-      KJ_SYSCALL(write(STDOUT_FILENO, kj::str(email).cStr(), kj::str(email).size()));
-      KJ_SYSCALL(write(STDOUT_FILENO, STRING_AND_SIZE("")));
-
       g_object_unref(msg);
       return req.send().then([](auto results) {});
     }
