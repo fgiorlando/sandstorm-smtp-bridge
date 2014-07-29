@@ -66,15 +66,41 @@ public:
         .build();
   }
 
+  struct AcceptedConnection {
+    kj::Own<kj::AsyncIoStream> connection;
+    capnp::TwoPartyVatNetwork network;
+    capnp::RpcSystem<capnp::rpc::twoparty::SturdyRefHostId> rpcSystem;
+
+    explicit AcceptedConnection(kj::Own<kj::AsyncIoStream>&& connectionParam)
+        : connection(kj::mv(connectionParam)),
+          network(*connection, capnp::rpc::twoparty::Side::CLIENT),
+          rpcSystem(capnp::makeRpcClient(network)) {}
+  };
+
   kj::MainBuilder::Validity run() {
       ErrorHandlerImpl errorHandler;
       kj::TaskSet tasks(errorHandler);
+
+      auto connection = ioContext.provider->getNetwork().parseAddress("unix:/tmp/sandstorm-api").then([](auto addr) {
+        return addr->connect();
+      }).then([](auto connection) {
+        return kj::heap<AcceptedConnection>(kj::mv(connection));
+      });
+
+      EmailSendPort::Client session(connection.then([&](auto acceptedConnection) {
+        capnp::MallocMessageBuilder message;
+        auto root = message.getRoot<capnp::rpc::SturdyRef>();
+        auto hostId = root.getHostId().getAs<capnp::rpc::twoparty::SturdyRefHostId>();
+        hostId.setSide(capnp::rpc::twoparty::Side::SERVER);
+        root.getObjectId().setAs<capnp::Text>("HackSessionContext");
+        return acceptedConnection->rpcSystem.restore(hostId, root.getObjectId()).template castAs<EmailSendPort>();
+      }));
 
       auto acceptTask = ioContext.provider->getNetwork()
           .parseAddress("127.0.0.1", 30125)
           .then([&](kj::Own<kj::NetworkAddress>&& addr) {
         auto serverPort = addr->listen();
-        auto promise = smtp::runServer(*serverPort, tasks);
+        auto promise = smtp::runServer(*serverPort, tasks, session);
         return promise.attach(kj::mv(serverPort));
       });
       acceptTask.wait(ioContext.waitScope);

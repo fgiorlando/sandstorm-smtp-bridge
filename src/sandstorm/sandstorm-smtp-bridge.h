@@ -40,24 +40,61 @@ namespace sandstorm {
     g_mime_init(0); //only one time
             g_mime_charset_map_init();
             g_mime_iconv_init();
-    auto newString = kj::str(str, END_BODY);
     GMimeMessage *message;
     GMimeParser *parser;
     GMimeStream *stream;
 
     /* create a stream to read from the file descriptor */
-    stream = g_mime_stream_mem_new_with_buffer (newString.cStr(), newString.size());
+    stream = g_mime_stream_mem_new_with_buffer (str.cStr(), str.size());
 
     /* create a new parser object to parse the stream */
     parser = g_mime_parser_new_with_stream (stream);
+
+    /* unref the stream (parser owns a ref, so this object does not actually get free'd until we destroy the parser) */
+    g_object_unref (stream);
 
     /* parse the message from the stream */
     message = g_mime_parser_construct_message (parser);
 
     /* free the parser */
-    // g_object_unref (parser);
+    g_object_unref (parser);
 
     return message;
+  }
+
+  kj::Vector<kj::ArrayPtr<const char>> split(kj::ArrayPtr<const char> input, char delim) {
+    kj::Vector<kj::ArrayPtr<const char>> result;
+
+    size_t start = 0;
+    for (size_t i: kj::indices(input)) {
+      if (input[i] == delim) {
+        result.add(input.slice(start, i));
+        start = i + 1;
+      }
+    }
+    result.add(input.slice(start, input.size()));
+    return result;
+  }
+
+  kj::Maybe<kj::ArrayPtr<const char>> splitFirst(kj::ArrayPtr<const char>& input, char delim) {
+    for (size_t i: kj::indices(input)) {
+      if (input[i] == delim) {
+        auto result = input.slice(0, i);
+        input = input.slice(i + 1, input.size());
+        return result;
+      }
+    }
+    return nullptr;
+  }
+
+  kj::ArrayPtr<const char> trim(kj::ArrayPtr<const char> input) {
+    while (input.size() > 0 && input[0] == ' ') {
+      input = input.slice(1, input.size());
+    }
+    while (input.size() > 0 && input[input.size() - 1] == ' ') {
+      input = input.slice(0, input.size() - 1);
+    }
+    return input;
   }
 
   inline kj::Maybe<size_t> findFirst(kj::StringPtr str, char c, size_t start = 0) {
@@ -97,13 +134,15 @@ namespace sandstorm {
 
   struct AcceptedConnection {
     kj::Own<kj::AsyncIoStream> connection;
+    EmailSendPort::Client& emailCap;
     kj::String lastBuffer;
     char buf[1024];
 
-    explicit AcceptedConnection(kj::Own<kj::AsyncIoStream>&& connectionParam)
-        : connection(kj::mv(connectionParam)), lastBuffer(kj::str("")) { }
+    explicit AcceptedConnection(kj::Own<kj::AsyncIoStream>&& connectionParam, EmailSendPort::Client& emailCap)
+        : connection(kj::mv(connectionParam)), emailCap(emailCap), lastBuffer(kj::str("")) { }
 
     kj::Promise<kj::String> readUntilHelper(kj::String&& delimiter, kj::Vector<kj::String>&& output) {
+      // TODO(soon): handle if delimiter is split across more than a single read. Check if this is even necessary?
       return connection->tryRead(buf, 1, sizeof(buf) - 1).then([&, delimiter=kj::mv(delimiter), output=kj::mv(output)](size_t size) mutable -> kj::Promise<kj::String>  {
         if (size == 0) {
           return kj::strArray(output, "");
@@ -113,7 +152,7 @@ namespace sandstorm {
         kj::StringPtr temp(buf, size);
 
         KJ_IF_MAYBE(pos, find(temp, delimiter)) {
-          output.add(kj::heapString(temp.slice(0, *pos)));
+          output.add(kj::heapString(temp.slice(0, *pos + delimiter.size())));
 
           if (*pos + delimiter.size() < temp.size()) {
             lastBuffer = kj::heapString(temp.slice(*pos + delimiter.size()));
@@ -141,28 +180,191 @@ namespace sandstorm {
       });
     }
 
-    kj::Promise<void> forwardMessage(kj::StringPtr data) {
-      // capnp::EzRpcClient client("unix:/tmp/sandstorm-api");
-      // EmailSendPort::Client session = client.importCap<EmailSendPort>("HackSessionContext");
-      // auto req = session.sendRequest();
-      auto msg = parse_message(data);
-      auto part = g_mime_message_get_mime_part(msg);
+    #define SET_HEADER(name, gmimeName) \
+      header = g_mime_object_get_header((GMimeObject*)msg, #gmimeName); \
+      if (header) { \
+        decoded = g_mime_utils_header_decode_text(header); \
+        HEADER_OBJECT.set##name(decoded); \
+        g_free(decoded); \
+      }
 
-      auto subject =  g_mime_object_get_header((GMimeObject*)msg, "Subject"); // memleak
+    #define SET_HEADER_LIST(name, gmimeName) \
+      header = g_mime_object_get_header((GMimeObject*)msg, #gmimeName); \
+      if (header) { \
+        decoded = g_mime_utils_header_decode_text(header); \
+        HEADER_OBJECT.init##name(1); \
+        HEADER_OBJECT.get##name().set(0, decoded); \
+        g_free(decoded); \
+      }
 
-      KJ_SYSCALL(write(STDOUT_FILENO, subject, strlen(subject)));
-      KJ_SYSCALL(write(STDOUT_FILENO, STRING_AND_SIZE("")));
 
-      // g_free(msg);
-      return kj::READY_NOW;
+    void setEmailHeader(sandstorm::EmailAddress::Builder&& address, char * val) {
+      address.setAddress(val);
     }
 
-    kj::Promise<void> handleCommand(kj::String&& line) {
-      kj::ArrayPtr<const char> rawCommand;
-      KJ_IF_MAYBE(pos, line.findFirst(' ')) {
-        rawCommand = line.slice(0, *pos);
+    #define SET_EMAIL_HEADER(name, gmimeName) \
+      header = g_mime_object_get_header((GMimeObject*)msg, #gmimeName); \
+      if (header) { \
+        decoded = g_mime_utils_header_decode_text(header); \
+        setEmailHeader(HEADER_OBJECT.get##name(), decoded); \
+        g_free(decoded); \
+      }
+
+    #define SET_EMAIL_HEADER_LIST(name, gmimeName) \
+      header = g_mime_object_get_header((GMimeObject*)msg, #gmimeName); \
+      if (header) { \
+        decoded = g_mime_utils_header_decode_text(header); \
+        HEADER_OBJECT.init##name(1); \
+        setEmailHeader(HEADER_OBJECT.get##name()[0], decoded); \
+        g_free(decoded); \
+      }
+
+    kj::String partToString(GMimeObject * part) {
+      auto content = g_mime_part_get_content_object((GMimePart *)part);
+      KJ_ASSERT(content != NULL, "Content of message unexpectedly null");
+      auto stream = g_mime_data_wrapper_get_stream(content);
+      auto length = g_mime_stream_length(stream);
+      KJ_ASSERT(length >= 0, "Content's stream has unknown length", length);
+      kj::String ret = kj::heapString(length);
+      g_mime_stream_read(stream, ret.begin(), length);
+
+      return ret;
+    }
+
+    kj::String partToString(GMimeObject * part, GMimeContentEncoding encoding) {
+      if (encoding == GMIME_CONTENT_ENCODING_DEFAULT) {
+        return partToString(part);
+      }
+
+      auto content = g_mime_part_get_content_object((GMimePart *)part);
+      KJ_ASSERT(content != NULL, "Content of message unexpectedly null");
+      auto stream = g_mime_data_wrapper_get_stream(content);
+      auto filteredStream = g_mime_stream_filter_new(stream);
+      auto filter = g_mime_filter_basic_new(encoding, FALSE);
+      g_mime_stream_filter_add((GMimeStreamFilter *)filteredStream, filter);
+      auto length = g_mime_stream_length(filteredStream);
+      KJ_ASSERT(length >= 0, "Content's stream has unknown length", length);
+      kj::String ret = kj::heapString(length);
+      auto numBytes = g_mime_stream_read(filteredStream, ret.begin(), length);
+
+      g_object_unref (filteredStream);
+      g_object_unref (filter);
+      return kj::heapString(ret.slice(0, numBytes));
+    }
+
+    void addAttachment(EmailMessage::Builder& email, GMimeObject * part, int attachmentCount) {
+      auto msg = part;
+      const char * header;
+      char * decoded;
+
+      auto attachment = email.getAttachments()[attachmentCount];
+      header = g_mime_object_get_header((GMimeObject*)msg, "Content-Transfer-Encoding");
+      GMimeContentEncoding encoding = GMIME_CONTENT_ENCODING_DEFAULT;
+      if (header != NULL) {
+        encoding = g_mime_content_encoding_from_string(header);
+      }
+      auto str = partToString(part, encoding);
+      kj::ArrayPtr<const capnp::byte> data(reinterpret_cast<const capnp::byte *>(str.begin()), str.size());
+
+      attachment.setContent(data);
+      #define HEADER_OBJECT attachment
+      SET_HEADER(ContentType, Content-Type)
+      SET_HEADER(ContentDisposition, Content-Disposition)
+      SET_HEADER(ContentId, Content-Id)
+      #undef HEADER_OBJECT
+    }
+
+    void setBody(EmailMessage::Builder& email, GMimeObject * part, bool isTopLevel, int attachmentCount=0) {
+      auto type = g_mime_object_get_content_type(part);
+      if (!type) {
+        if (isTopLevel) {
+          email.setText(partToString(part));
+        } else {
+          addAttachment(email, part, attachmentCount);
+        }
       } else {
-        rawCommand = line;
+        if (g_mime_content_type_is_type(type, "text", "*")) {
+          if (g_mime_content_type_is_type(type, "text", "html")) {
+            email.setHtml(partToString(part));
+          } else {
+            email.setText(partToString(part));
+          }
+        } else if (isTopLevel && GMIME_IS_MULTIPART(part)) {
+          GMimeMultipart * multipart = (GMimeMultipart *)part;
+          int numParts = g_mime_multipart_get_count(multipart);
+          int numAttachments = 0;
+          for(int i = 0; i < numParts; ++i) {
+            auto subPart = g_mime_multipart_get_part(multipart, i);
+            KJ_ASSERT(subPart != NULL, "Unexpected bad part in multipart message");
+            auto subType = g_mime_object_get_content_type(subPart);
+            if (subType == NULL || !g_mime_content_type_is_type(subType, "text", "*")) {
+              ++numAttachments;
+            }
+          }
+          if (numAttachments > 0) {
+            email.initAttachments(numAttachments);
+          }
+          int attachmentCount = 0;
+          for(int i = 0; i < numParts; ++i) {
+            auto subPart = g_mime_multipart_get_part(multipart, i);
+            auto subType = g_mime_object_get_content_type(subPart);
+            setBody(email, subPart, false, attachmentCount);
+            if (subType == NULL || !g_mime_content_type_is_type(subType, "text", "*")) {
+              ++attachmentCount;
+            }
+          }
+        } else {
+          if (isTopLevel) {
+            KJ_FAIL_ASSERT("Unhandled media type for top-level", g_mime_content_type_to_string(type));
+          } else {
+            addAttachment(email, part, attachmentCount);
+          }
+        }
+      }
+    }
+    kj::Promise<void> forwardMessage(kj::StringPtr data) {
+      auto req = emailCap.sendRequest();
+      auto msg = parse_message(data);
+      auto email = req.getEmail();
+      auto part = g_mime_message_get_mime_part(msg);
+      const char * header;
+      char * decoded;
+
+      KJ_REQUIRE(GMIME_IS_OBJECT(msg), "Message was unable to parsed as a valid MIME object");
+      #define HEADER_OBJECT email
+      SET_EMAIL_HEADER_LIST(To, To);
+      SET_EMAIL_HEADER(From, From);
+      SET_EMAIL_HEADER(ReplyTo, Reply-To);
+      SET_EMAIL_HEADER_LIST(Cc, Cc);
+      SET_EMAIL_HEADER_LIST(Bcc, Bcc);
+      SET_HEADER(Subject, Subject);
+
+      SET_HEADER(MessageId, Message-Id);
+      SET_HEADER_LIST(References, References);
+      SET_HEADER_LIST(InReplyTo, In-Reply-To);
+      #undef HEADER_OBJECT
+
+
+      if (!part) {
+        // Fail?
+        auto objStr = g_mime_object_to_string((GMimeObject*)msg);
+        email.setText(objStr);
+        g_free(objStr);
+      } else {
+        setBody(email, part, true);
+      }
+
+      KJ_SYSCALL(write(STDOUT_FILENO, kj::str(email).cStr(), kj::str(email).size()));
+      KJ_SYSCALL(write(STDOUT_FILENO, STRING_AND_SIZE("")));
+
+      g_object_unref(msg);
+      return req.send().then([](auto results) {});
+    }
+
+    kj::Promise<bool> handleCommand(kj::String&& line) {
+      kj::ArrayPtr<const char> rawCommand = line.slice(0, line.size() - 2); // Chop off line ending
+      KJ_IF_MAYBE(pos, line.findFirst(' ')) {
+        rawCommand = rawCommand.slice(0, *pos);
       }
 
       auto command = kj::heapString(rawCommand);
@@ -170,10 +372,14 @@ namespace sandstorm {
       // TODO(soon): make comparisons case insensitive
       if (command == "helo") {
         // TODO(soon): make sure hostname is passed as an argument
-        return connection->write(STRING_AND_SIZE("250 Sandstorm at your service"));
+        return connection->write(STRING_AND_SIZE("250 Sandstorm at your service")).then([]() {
+          return true;
+        });
       } else if (command == "mail") {
         // TODO(soon): do something here?
-        return connection->write(STRING_AND_SIZE("250 OK"));
+        return connection->write(STRING_AND_SIZE("250 OK")).then([]() {
+          return true;
+        });
       } else if (command == "data") {
         return connection->write(STRING_AND_SIZE("354 Start mail input; end with <CRLF>.<CRLF>")).then([&]() {
           return readUntil(kj::str(END_BODY));
@@ -181,30 +387,47 @@ namespace sandstorm {
           return forwardMessage(data);
         }).then([&]() {
             connection->write(STRING_AND_SIZE("250 OK"));
+        }).then([]() {
+          return true;
         });
       } else if (command == "rcpt") {
         // TODO(soon): do something here?
-        return connection->write(STRING_AND_SIZE("250 OK"));
+        return connection->write(STRING_AND_SIZE("250 OK")).then([]() {
+          return true;
+        });
       } else if (command == "noop") {
-        return connection->write(STRING_AND_SIZE("250 OK"));
+        return connection->write(STRING_AND_SIZE("250 OK")).then([]() {
+          return true;
+        });
       } else if (command == "rset") {
         // TODO(soon): make sure it's ok to do nothing here
-        return connection->write(STRING_AND_SIZE("250 OK"));
+        return connection->write(STRING_AND_SIZE("250 OK")).then([]() {
+          return true;
+        });
       } else if (command == "quit") {
         // TODO(soon): make this less hacky
-        return connection->write(STRING_AND_SIZE("221 2.0.0 Goodbye!"));
+        return connection->write(STRING_AND_SIZE("221 2.0.0 Goodbye!")).then([]() {
+          return false;
+        });
       } else {
-        return connection->write(STRING_AND_SIZE("502 5.5.2 Error: command not recognized"));
+        return connection->write(STRING_AND_SIZE("502 5.5.2 Error: command not recognized")).then([]() {
+          return true;
+        });
       }
     }
+
     kj::Promise<void> messageLoop() {
       return readUntil(kj::str(END_LINE)).then(
           [this](kj::String&& line) -> kj::Promise<void> {
         if (line.size() == 0) {
           return kj::READY_NOW;
         }
-        return handleCommand(kj::mv(line)).then([&]() {
-          return messageLoop();
+        return handleCommand(kj::mv(line)).then([&](bool continueLoop) -> kj::Promise<void> {
+          if (continueLoop) {
+            return messageLoop();
+          } else {
+            return kj::READY_NOW;
+          }
         });
       },
           [this](kj::Exception&& err) {
@@ -216,12 +439,12 @@ namespace sandstorm {
   };
 
   kj::Promise<void> runServer(kj::ConnectionReceiver& serverPort,
-                               kj::TaskSet& taskSet) {
+                               kj::TaskSet& taskSet, EmailSendPort::Client& emailCap) {
     return serverPort.accept().then([&](kj::Own<kj::AsyncIoStream>&& connection) {
-      auto connectionState = kj::heap<AcceptedConnection>(kj::mv(connection));
+      auto connectionState = kj::heap<AcceptedConnection>(kj::mv(connection), emailCap);
       auto promise = connectionState->start();
       taskSet.add(promise.attach(kj::mv(connectionState)));
-      return runServer(serverPort, taskSet);
+      return runServer(serverPort, taskSet, emailCap);
     });
   }
 
