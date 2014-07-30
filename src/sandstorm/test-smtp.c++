@@ -81,13 +81,14 @@ public:
       ErrorHandlerImpl errorHandler;
       kj::TaskSet tasks(errorHandler);
 
+      kj::Own<AcceptedConnection> acceptedConnection;
       auto connection = ioContext.provider->getNetwork().parseAddress("unix:/tmp/sandstorm-api").then([](auto addr) {
         return addr->connect();
-      }).then([](auto connection) {
-        return new AcceptedConnection(kj::mv(connection));
+      }).then([&](auto connection) {
+        acceptedConnection = kj::heap<AcceptedConnection>(kj::mv(connection));
       });
 
-      EmailSendPort::Client session(connection.then([&](auto acceptedConnection) {
+      EmailSendPort::Client session(connection.then([&]() {
         capnp::MallocMessageBuilder message;
         auto root = message.getRoot<capnp::rpc::SturdyRef>();
         auto hostId = root.getHostId().getAs<capnp::rpc::twoparty::SturdyRefHostId>();
