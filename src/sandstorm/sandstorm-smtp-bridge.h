@@ -196,7 +196,13 @@ namespace sandstorm {
 
 
     void setEmailHeader(sandstorm::EmailAddress::Builder&& address, char * val) {
-      address.setAddress(val);
+      kj::String orig = kj::str(val);
+      KJ_IF_MAYBE(pos, orig.findFirst('<')) {
+        address.setName(kj::str(orig.slice(0, *pos)));
+        address.setAddress(kj::str(orig.slice(*pos + 1, orig.size() - 1)));
+      } else {
+        address.setAddress(val);
+      }
     }
 
     #define SET_EMAIL_HEADER(name, gmimeName) \
