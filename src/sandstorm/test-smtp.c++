@@ -84,7 +84,7 @@ public:
       auto connection = ioContext.provider->getNetwork().parseAddress("unix:/tmp/sandstorm-api").then([](auto addr) {
         return addr->connect();
       }).then([](auto connection) {
-        return kj::heap<AcceptedConnection>(kj::mv(connection));
+        return new AcceptedConnection(kj::mv(connection));
       });
 
       EmailSendPort::Client session(connection.then([&](auto acceptedConnection) {
