@@ -24,14 +24,14 @@ CXXFLAGS2=-std=c++1y -Isrc -Itmp $(CXXFLAGS)
 
 .PHONY: all clean
 
-all: bin/test-smtp
+all: bin/sandstorm-smtp-bridge
 
 clean:
 	rm -rf bin tmp
-bin/test-smtp: tmp/genfiles src/sandstorm/test-smtp.c++ src/sandstorm/sandstorm-smtp-bridge.h
-	@echo "building bin/test-smtp..."
+bin/sandstorm-smtp-bridge: tmp/genfiles src/sandstorm/sandstorm-smtp-bridge.c++ src/sandstorm/sandstorm-smtp-bridge.h
+	@echo "building bin/sandstorm-smtp-bridge..."
 	@mkdir -p bin
-	@$(CXX) src/sandstorm/test-smtp.c++ tmp/sandstorm/*.capnp.c++ -o bin/test-smtp -static $(CXXFLAGS2) `pkg-config gmime-2.6 capnp-rpc --static --cflags --libs`
+	@$(CXX) src/sandstorm/sandstorm-smtp-bridge.c++ tmp/sandstorm/*.capnp.c++ -o bin/sandstorm-smtp-bridge -static $(CXXFLAGS2) `pkg-config gmime-2.6 capnp-rpc --static --cflags --libs`
 
 tmp/genfiles: /opt/sandstorm/latest/usr/include/sandstorm/*.capnp
 	@echo "generating capnp files..."
