@@ -142,25 +142,22 @@ namespace sandstorm {
         : connection(kj::mv(connectionParam)), emailCap(emailCap), lastBuffer(kj::str("")) { }
 
     kj::Promise<kj::String> readUntilHelper(kj::String&& delimiter, kj::Vector<kj::String>&& output) {
-      // TODO(soon): handle if delimiter is split across more than a single read. Check if this is even necessary?
       return connection->tryRead(buf, 1, sizeof(buf) - 1).then([&, delimiter=kj::mv(delimiter), output=kj::mv(output)](size_t size) mutable -> kj::Promise<kj::String>  {
         if (size == 0) {
           return kj::strArray(output, "");
         }
 
         buf[size] = '\0';
-        kj::StringPtr temp(buf, size);
+        kj::StringPtr line(buf, size);
+        // TODO(someday): don't search all lines, just look at the minimum amount needed
+        kj::String all = kj::str(kj::strArray(output, ""), line);
 
-        KJ_IF_MAYBE(pos, find(temp, delimiter)) {
-          output.add(kj::heapString(temp.slice(0, *pos + delimiter.size())));
+        KJ_IF_MAYBE(pos, find(all, delimiter)) {
+          lastBuffer = kj::heapString(all.slice(*pos + delimiter.size()));
 
-          if (*pos + delimiter.size() < temp.size()) {
-            lastBuffer = kj::heapString(temp.slice(*pos + delimiter.size()));
-          }
-
-          return kj::strArray(output, "");
+          return kj::heapString(all.slice(0, *pos + delimiter.size()));
         } else {
-          output.add(kj::heapString(temp));
+          output.add(kj::heapString(line));
           return readUntilHelper(kj::mv(delimiter), kj::mv(output));
         }
       });
@@ -366,14 +363,13 @@ namespace sandstorm {
 
       auto command = kj::heapString(rawCommand);
       toLower(command);
-      // TODO(soon): make comparisons case insensitive
       if (command == "helo") {
-        // TODO(soon): make sure hostname is passed as an argument
+        // TODO(someday): make sure hostname is passed as an argument
         return connection->write(STRING_AND_SIZE("250 Sandstorm at your service")).then([]() {
           return true;
         });
       } else if (command == "mail") {
-        // TODO(soon): do something here?
+        // TODO(someday): do something here?
         return connection->write(STRING_AND_SIZE("250 OK")).then([]() {
           return true;
         });
@@ -388,7 +384,7 @@ namespace sandstorm {
           return true;
         });
       } else if (command == "rcpt") {
-        // TODO(soon): do something here?
+        // TODO(someday): do something here?
         return connection->write(STRING_AND_SIZE("250 OK")).then([]() {
           return true;
         });
@@ -397,12 +393,10 @@ namespace sandstorm {
           return true;
         });
       } else if (command == "rset") {
-        // TODO(soon): make sure it's ok to do nothing here
         return connection->write(STRING_AND_SIZE("250 OK")).then([]() {
           return true;
         });
       } else if (command == "quit") {
-        // TODO(soon): make this less hacky
         return connection->write(STRING_AND_SIZE("221 2.0.0 Goodbye!")).then([]() {
           return false;
         });
