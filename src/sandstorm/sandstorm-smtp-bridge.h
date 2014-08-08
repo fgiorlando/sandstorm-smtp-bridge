@@ -88,11 +88,11 @@ namespace sandstorm {
     return nullptr;
   }
 
-  kj::ArrayPtr<const char> trim(kj::ArrayPtr<const char> input) {
-    while (input.size() > 0 && input[0] == ' ') {
+  kj::ArrayPtr<const char> trim(kj::ArrayPtr<const char> input, char trimChar=' ') {
+    while (input.size() > 0 && input[0] == trimChar) {
       input = input.slice(1, input.size());
     }
-    while (input.size() > 0 && input[input.size() - 1] == ' ') {
+    while (input.size() > 0 && input[input.size() - 1] == trimChar) {
       input = input.slice(0, input.size() - 1);
     }
     return input;
@@ -224,6 +224,16 @@ namespace sandstorm {
       }
 
     kj::String partToString(GMimeObject * part) {
+      const char * encoding = NULL;
+
+      encoding = g_mime_object_get_header((GMimeObject*)part, "Content-Transfer-Encoding");
+      if (encoding != NULL) {
+        auto gmimeEncoding = g_mime_content_encoding_from_string(encoding);
+        if (gmimeEncoding != GMIME_CONTENT_ENCODING_DEFAULT) {
+          return partToString(part, gmimeEncoding);
+        }
+      }
+
       auto content = g_mime_part_get_content_object((GMimePart *)part);
       KJ_ASSERT(content != NULL, "Content of message unexpectedly null");
       auto stream = g_mime_data_wrapper_get_stream(content);
@@ -256,18 +266,21 @@ namespace sandstorm {
       return kj::heapString(ret.slice(0, numBytes));
     }
 
-    void addAttachment(EmailMessage::Builder& email, GMimeObject * part, int attachmentCount) {
+    struct Email {
+      kj::String text;
+      kj::String html;
+      capnp::MallocMessageBuilder message;
+      kj::Vector<capnp::Orphan<EmailAttachment>> attachments;
+    };
+
+    void addAttachment(Email& email, GMimeObject * part) {
       auto msg = part;
       const char * header;
       char * decoded;
 
-      auto attachment = email.getAttachments()[attachmentCount];
-      header = g_mime_object_get_header((GMimeObject*)msg, "Content-Transfer-Encoding");
-      GMimeContentEncoding encoding = GMIME_CONTENT_ENCODING_DEFAULT;
-      if (header != NULL) {
-        encoding = g_mime_content_encoding_from_string(header);
-      }
-      auto str = partToString(part, encoding);
+      email.attachments.add(email.message.getOrphanage().newOrphan<EmailAttachment>());
+      auto attachment = email.attachments.back().get();
+      auto str = partToString(part);
       kj::ArrayPtr<const capnp::byte> data(reinterpret_cast<const capnp::byte *>(str.begin()), str.size());
 
       attachment.setContent(data);
@@ -275,59 +288,42 @@ namespace sandstorm {
       SET_HEADER(ContentType, Content-Type)
       SET_HEADER(ContentDisposition, Content-Disposition)
       SET_HEADER(ContentId, Content-Id)
+
+      header = g_mime_object_get_header((GMimeObject*)msg, "Content-Id");
+      if (header) {
+        decoded = g_mime_utils_header_decode_text(header);
+        auto tmp = kj::str(decoded);
+        auto trimmed = trim(trim(tmp, '<'), '>');
+        HEADER_OBJECT.setContentId(kj::str(trimmed));
+        g_free(decoded);
+      }
       #undef HEADER_OBJECT
     }
 
-    void setBody(EmailMessage::Builder& email, GMimeObject * part, bool isTopLevel, int attachmentCount=0) {
+    void setBody(Email& email, GMimeObject * part, bool isTopLevel) {
       auto type = g_mime_object_get_content_type(part);
       if (!type) {
         if (isTopLevel) {
-          email.setText(partToString(part));
+          email.text = partToString(part);
         } else {
           KJ_FAIL_ASSERT("Unhandled mime part with unkown type");
         }
       } else {
         if (g_mime_object_get_disposition(part) != NULL) {
-            addAttachment(email, part, attachmentCount);
+            addAttachment(email, part);
         } else if (g_mime_content_type_is_type(type, "text", "*")) {
           if (g_mime_content_type_is_type(type, "text", "html")) {
-            email.setHtml(partToString(part));
+            email.html = partToString(part);
           } else {
-            email.setText(partToString(part));
+            email.text = partToString(part);
           }
         } else if (GMIME_IS_MULTIPART(part)) {
-          if (isTopLevel) {
-            GMimeMultipart * multipart = (GMimeMultipart *)part;
-            int numParts = g_mime_multipart_get_count(multipart);
-            int numAttachments = 0;
+          GMimeMultipart * multipart = (GMimeMultipart *)part;
+          int numParts = g_mime_multipart_get_count(multipart);
 
-            // TODO: make attachments orphans
-            for(int i = 0; i < numParts; ++i) {
-              auto subPart = g_mime_multipart_get_part(multipart, i);
-              KJ_ASSERT(subPart != NULL, "Unexpected bad part in multipart message");
-              if (g_mime_object_get_disposition(subPart) != NULL) {
-                ++numAttachments;
-              }
-            }
-            if (numAttachments > 0) {
-              email.initAttachments(numAttachments);
-            }
-            int attachmentCount = 0;
-            for(int i = 0; i < numParts; ++i) {
-              auto subPart = g_mime_multipart_get_part(multipart, i);
-              setBody(email, subPart, false, attachmentCount);
-              if (g_mime_object_get_disposition(subPart) != NULL) {
-                ++attachmentCount;
-              }
-            }
-          } else {
-            GMimeMultipart * multipart = (GMimeMultipart *)part;
-            int numParts = g_mime_multipart_get_count(multipart);
-
-            for(int i = 0; i < numParts; ++i) {
-              auto subPart = g_mime_multipart_get_part(multipart, i);
-              setBody(email, subPart, false, attachmentCount); // TODO: handle attachments
-            }
+          for(int i = 0; i < numParts; ++i) {
+            auto subPart = g_mime_multipart_get_part(multipart, i);
+            setBody(email, subPart, false);
           }
         } else {
           KJ_FAIL_ASSERT("Unhandled mime part", g_mime_content_type_to_string(type));
@@ -368,7 +364,19 @@ namespace sandstorm {
         email.setText(objStr);
         g_free(objStr);
       } else {
-        setBody(email, part, true);
+        Email tmpEmail;
+        setBody(tmpEmail, part, true);
+        if (tmpEmail.text.size() > 0) {
+          email.setText(tmpEmail.text);
+        }
+        if (tmpEmail.html.size() > 0) {
+          email.setHtml(tmpEmail.html);
+        }
+
+        auto attachments = email.initAttachments(tmpEmail.attachments.size());
+        for (size_t i = 0; i < tmpEmail.attachments.size(); ++i) {
+          attachments.setWithCaveats(i, tmpEmail.attachments[i].getReader());
+        }
       }
 
       g_object_unref(msg);
