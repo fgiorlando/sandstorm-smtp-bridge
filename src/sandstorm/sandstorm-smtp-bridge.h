@@ -283,10 +283,12 @@ namespace sandstorm {
         if (isTopLevel) {
           email.setText(partToString(part));
         } else {
-          addAttachment(email, part, attachmentCount);
+          KJ_FAIL_ASSERT("Unhandled mime part with unkown type");
         }
       } else {
-        if (g_mime_content_type_is_type(type, "text", "*")) {
+        if (g_mime_object_get_disposition(part) != NULL) {
+            addAttachment(email, part, attachmentCount);
+        } else if (g_mime_content_type_is_type(type, "text", "*")) {
           if (g_mime_content_type_is_type(type, "text", "html")) {
             email.setHtml(partToString(part));
           } else {
@@ -299,8 +301,7 @@ namespace sandstorm {
           for(int i = 0; i < numParts; ++i) {
             auto subPart = g_mime_multipart_get_part(multipart, i);
             KJ_ASSERT(subPart != NULL, "Unexpected bad part in multipart message");
-            auto subType = g_mime_object_get_content_type(subPart);
-            if (subType == NULL || !g_mime_content_type_is_type(subType, "text", "*")) {
+            if (g_mime_object_get_disposition(subPart) != NULL) {
               ++numAttachments;
             }
           }
@@ -310,18 +311,13 @@ namespace sandstorm {
           int attachmentCount = 0;
           for(int i = 0; i < numParts; ++i) {
             auto subPart = g_mime_multipart_get_part(multipart, i);
-            auto subType = g_mime_object_get_content_type(subPart);
             setBody(email, subPart, false, attachmentCount);
-            if (subType == NULL || !g_mime_content_type_is_type(subType, "text", "*")) {
+            if (g_mime_object_get_disposition(subPart) != NULL) {
               ++attachmentCount;
             }
           }
         } else {
-          if (isTopLevel) {
-            KJ_FAIL_ASSERT("Unhandled media type for top-level", g_mime_content_type_to_string(type));
-          } else {
-            addAttachment(email, part, attachmentCount);
-          }
+          KJ_FAIL_ASSERT("Unhandled mime part", g_mime_content_type_to_string(type));
         }
       }
     }
@@ -350,6 +346,7 @@ namespace sandstorm {
 
       if (!part) {
         // Fail?
+        KJ_SYSCALL(write(STDERR_FILENO, STRING_AND_SIZE("sandstorm-smtp-bridge: Mime part of email wan't found?")));
         auto objStr = g_mime_object_to_string((GMimeObject*)msg);
         email.setText(objStr);
         g_free(objStr);
@@ -358,6 +355,7 @@ namespace sandstorm {
       }
 
       g_object_unref(msg);
+
       return req.send().then([](auto results) {});
     }
 
