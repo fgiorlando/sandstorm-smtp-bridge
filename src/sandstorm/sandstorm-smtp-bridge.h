@@ -295,26 +295,38 @@ namespace sandstorm {
           } else {
             email.setText(partToString(part));
           }
-        } else if (isTopLevel && GMIME_IS_MULTIPART(part)) {
-          GMimeMultipart * multipart = (GMimeMultipart *)part;
-          int numParts = g_mime_multipart_get_count(multipart);
-          int numAttachments = 0;
-          for(int i = 0; i < numParts; ++i) {
-            auto subPart = g_mime_multipart_get_part(multipart, i);
-            KJ_ASSERT(subPart != NULL, "Unexpected bad part in multipart message");
-            if (g_mime_object_get_disposition(subPart) != NULL) {
-              ++numAttachments;
+        } else if (GMIME_IS_MULTIPART(part)) {
+          if (isTopLevel) {
+            GMimeMultipart * multipart = (GMimeMultipart *)part;
+            int numParts = g_mime_multipart_get_count(multipart);
+            int numAttachments = 0;
+
+            // TODO: make attachments orphans
+            for(int i = 0; i < numParts; ++i) {
+              auto subPart = g_mime_multipart_get_part(multipart, i);
+              KJ_ASSERT(subPart != NULL, "Unexpected bad part in multipart message");
+              if (g_mime_object_get_disposition(subPart) != NULL) {
+                ++numAttachments;
+              }
             }
-          }
-          if (numAttachments > 0) {
-            email.initAttachments(numAttachments);
-          }
-          int attachmentCount = 0;
-          for(int i = 0; i < numParts; ++i) {
-            auto subPart = g_mime_multipart_get_part(multipart, i);
-            setBody(email, subPart, false, attachmentCount);
-            if (g_mime_object_get_disposition(subPart) != NULL) {
-              ++attachmentCount;
+            if (numAttachments > 0) {
+              email.initAttachments(numAttachments);
+            }
+            int attachmentCount = 0;
+            for(int i = 0; i < numParts; ++i) {
+              auto subPart = g_mime_multipart_get_part(multipart, i);
+              setBody(email, subPart, false, attachmentCount);
+              if (g_mime_object_get_disposition(subPart) != NULL) {
+                ++attachmentCount;
+              }
+            }
+          } else {
+            GMimeMultipart * multipart = (GMimeMultipart *)part;
+            int numParts = g_mime_multipart_get_count(multipart);
+
+            for(int i = 0; i < numParts; ++i) {
+              auto subPart = g_mime_multipart_get_part(multipart, i);
+              setBody(email, subPart, false, attachmentCount); // TODO: handle attachments
             }
           }
         } else {
