@@ -25,6 +25,7 @@
 #include <gmime/gmime.h>
 // requires libgpgme11-dev libgmime-2.6-dev libselinux1-dev
 #include <sandstorm/email.capnp.h>
+#include <sys/time.h>
 
 namespace sandstorm {
   namespace smtp {
@@ -323,6 +324,7 @@ namespace sandstorm {
     }
     kj::Promise<void> forwardMessage(kj::StringPtr data) {
       auto req = emailCap.sendRequest();
+      KJ_SYSCALL(write(STDOUT_FILENO, data.cStr(), data.size()));
       auto msg = parse_message(data);
       auto email = req.getEmail();
       auto part = g_mime_message_get_mime_part(msg);
@@ -343,6 +345,10 @@ namespace sandstorm {
       SET_HEADER_LIST(InReplyTo, In-Reply-To);
       #undef HEADER_OBJECT
 
+      // TODO: parse data
+      struct timeval tv;
+      gettimeofday(&tv,NULL);
+      email.setDate(tv.tv_sec*(uint64_t)1000000000+tv.tv_usec*1000);
 
       if (!part) {
         // Fail?
