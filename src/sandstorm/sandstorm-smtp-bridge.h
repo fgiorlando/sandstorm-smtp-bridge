@@ -336,7 +336,6 @@ namespace sandstorm {
     }
     kj::Promise<void> forwardMessage(kj::StringPtr data) {
       auto req = emailCap.sendRequest();
-      KJ_SYSCALL(write(STDOUT_FILENO, data.cStr(), data.size()));
       auto msg = parse_message(data);
       auto email = req.getEmail();
       auto part = g_mime_message_get_mime_part(msg);
