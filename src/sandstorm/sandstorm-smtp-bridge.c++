@@ -90,11 +90,12 @@ public:
 
       EmailSendPort::Client session(connection.then([&]() {
         capnp::MallocMessageBuilder message;
-        auto root = message.getRoot<capnp::rpc::SturdyRef>();
-        auto hostId = root.getHostId().getAs<capnp::rpc::twoparty::SturdyRefHostId>();
+        auto hostIdOrphan = message.getOrphanage().newOrphan<capnp::rpc::twoparty::SturdyRefHostId>();
+        auto hostId = hostIdOrphan.get();
+        auto objectId = message.getRoot<capnp::AnyPointer>();
         hostId.setSide(capnp::rpc::twoparty::Side::SERVER);
-        root.getObjectId().setAs<capnp::Text>("HackSessionContext");
-        return acceptedConnection->rpcSystem.restore(hostId, root.getObjectId()).template castAs<EmailSendPort>();
+        objectId.setAs<capnp::Text>("HackSessionContext");
+        return acceptedConnection->rpcSystem.restore(hostId, objectId).template castAs<EmailSendPort>();
       }));
 
       auto acceptTask = ioContext.provider->getNetwork()
