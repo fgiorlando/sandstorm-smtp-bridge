@@ -240,9 +240,18 @@ namespace sandstorm {
       auto length = g_mime_stream_length(stream);
       KJ_ASSERT(length >= 0, "Content's stream has unknown length", length);
       kj::String ret = kj::heapString(length);
-      g_mime_stream_read(stream, ret.begin(), length);
+      uint totalBytes = 0;
+      while (totalBytes < length) {
+        uint readBytes = g_mime_stream_read(stream, ret.begin() + totalBytes, length - totalBytes);
 
-      return ret;
+        KJ_ASSERT(readBytes != -1, "Read failed");
+        if (readBytes == 0) {
+          break;
+        }
+        totalBytes += readBytes;
+      }
+
+      return kj::heapString(ret.slice(0, totalBytes));
     }
 
     kj::String partToString(GMimeObject * part, GMimeContentEncoding encoding) {
@@ -259,11 +268,20 @@ namespace sandstorm {
       auto length = g_mime_stream_length(filteredStream);
       KJ_ASSERT(length >= 0, "Content's stream has unknown length", length);
       kj::String ret = kj::heapString(length);
-      auto numBytes = g_mime_stream_read(filteredStream, ret.begin(), length);
+      uint totalBytes = 0;
+      while (totalBytes < length) {
+        uint readBytes = g_mime_stream_read(filteredStream, ret.begin() + totalBytes, length - totalBytes);
+
+        KJ_ASSERT(readBytes != -1, "Read failed");
+        if (readBytes == 0) {
+          break;
+        }
+        totalBytes += readBytes;
+      }
 
       g_object_unref (filteredStream);
       g_object_unref (filter);
-      return kj::heapString(ret.slice(0, numBytes));
+      return kj::heapString(ret.slice(0, totalBytes));
     }
 
     struct Email {
